@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="da">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Gæt et tal</title>
+  <style>
+    :root { --radius: 12px; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      margin: 0; padding: 16px; background: #f6f7fb;
+    }
+    .app {
+      max-width: 520px; margin: 0 auto; background: #fff; padding: 18px;
+      border-radius: var(--radius); box-shadow: 0 6px 24px rgba(0,0,0,0.06);
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 8px; }
+    p { margin: 8px 0; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr auto;
+      gap: 8px; align-items: end; margin: 8px 0 4px; }
+    .controls label { display: grid; gap: 4px; font-size: 0.95rem; }
+    select { padding: 10px 12px; border: 1px solid #d7d9e0; border-radius: var(--radius); background: #fff; }
+    #guessForm { display: flex; gap: 8px; margin-top: 8px; }
+    #guess {
+      flex: 1; font-size: 1.1rem; padding: 12px 14px;
+      border: 1px solid #d7d9e0; border-radius: var(--radius); outline: none;
+    }
+    #guess:focus { border-color: #6b8cff; box-shadow: 0 0 0 3px rgba(107,140,255,0.25); }
+    button {
+      padding: 12px 14px; font-size: 1rem; border: 0; border-radius: var(--radius);
+      cursor: pointer; background: #111827; color: #fff;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #feedback { min-height: 1.6em; font-weight: 600; }
+    .meta { color: #4b5563; font-size: 0.95rem; }
+    .visually-hidden {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+    }
+    @media (max-width: 420px) { .controls { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <h1>Gæt et tal</h1>
+    <p>Vælg sværhedsgrad og prøv at gætte det hemmelige tal.</p>
+
+    <section class="controls">
+      <label>
+        Sværhedsgrad:
+        <select id="range">
+          <option value="10">1–10 (nem)</option>
+          <option value="50">1–50 (mellem)</option>
+          <option value="100">1–100 (svær)</option>
+        </select>
+      </label>
+
+      <label>
+        Maks. forsøg:
+        <select id="maxTries">
+          <option value="5">5</option>
+          <option value="7" selected>7</option>
+          <option value="10">10</option>
+          <option value="∞">Ubegrænset</option>
+        </select>
+      </label>
+
+      <button id="newGameBtn" type="button">Ny runde</button>
+    </section>
+
+    <form id="guessForm" autocomplete="off">
+      <label for="guess" class="visually-hidden">Dit gæt</label>
+      <input id="guess" name="guess" type="number" inputmode="numeric"
+             placeholder="Skriv dit gæt…" required />
+      <button id="checkBtn" type="submit">Tjek</button>
+    </form>
+
+    <p id="feedback" role="status" aria-live="polite"></p>
+
+    <div class="meta">
+      <p><strong>Forsøg:</strong> <span id="attempts">0</span>
+         — <strong>Tilbage:</strong> <span id="left">∞</span></p>
+      <p><strong>Dine gæt:</strong> <span id="history">—</span></p>
+      <p><strong>Highscore (færrest forsøg for denne sværhedsgrad):</strong>
+         <span id="highscore">—</span></p>
+    </div>
+
+    <button id="resetBtn" type="button" hidden>Spil igen</button>
+  </div>
+
+  <script>
+  (() => {
+    const form = document.getElementById('guessForm');
+    const input = document.getElementById('guess');
+    const checkBtn = document.getElementById('checkBtn');
+    const feedback = document.getElementById('feedback');
+    const attemptsEl = document.getElementById('attempts');
+    const leftEl = document.getElementById('left');
+    const historyEl = document.getElementById('history');
+    const resetBtn = document.getElementById('resetBtn');
+    const rangeSel = document.getElementById('range');
+    const maxTriesSel = document.getElementById('maxTries');
+    const newGameBtn = document.getElementById('newGameBtn');
+    const highscoreEl = document.getElementById('highscore');
+
+    let secret, attempts, history, maxVal, limit, remaining, gameOver;
+
+    const keyFor = (maxVal) => \`guessGame.highscore.\${maxVal}\`;
+
+    function getSavedHighscore(v) {
+      const raw = localStorage.getItem(keyFor(v));
+      return raw ? parseInt(raw, 10) : null;
+    }
+    function setSavedHighscore(v, score) {
+      localStorage.setItem(keyFor(v), String(score));
+    }
+
+    function randomInt(min, max) {
+      return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    function beep(freq = 440, durMs = 120, type = 'sine', vol = 0.1) {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = type; osc.frequency.value = freq;
+        gain.gain.value = vol;
+        osc.connect(gain).connect(ctx.destination);
+        osc.start();
+        setTimeout(() => { osc.stop(); ctx.close(); }, durMs);
+      } catch (_) { /* lyd kan være blokeret */ }
+    }
+
+    function vibrate(pattern) {
+      if (navigator.vibrate) navigator.vibrate(pattern);
+    }
+
+    function hotColdHint(diff, maxVal) {
+      const ratio = diff / maxVal;
+      if (diff === 0) return 'Bingo!';
+      if (ratio <= 0.01) return 'Ekstremt varmt 🔥';
+      if (ratio <= 0.03) return 'Meget varmt 🔥';
+      if (ratio <= 0.06) return 'Varmt ♨️';
+      if (ratio <= 0.10) return 'Lunt 🙂';
+      return 'Koldt 🧊';
+    }
+
+    function parseLimit(selVal) {
+      return selVal === '∞' ? Infinity : parseInt(selVal, 10);
+    }
+
+    function init() {
+      maxVal = parseInt(rangeSel.value, 10);
+      limit = parseLimit(maxTriesSel.value);
+      secret = randomInt(1, maxVal);
+      attempts = 0;
+      remaining = Number.isFinite(limit) ? limit : Infinity;
+      history = [];
+      gameOver = false;
+
+      attemptsEl.textContent = '0';
+      leftEl.textContent = Number.isFinite(remaining) ? String(remaining) : '∞';
+      historyEl.textContent = '—';
+      feedback.textContent = '';
+      input.value = '';
+      input.min = '1';
+      input.max = String(maxVal);
+      input.placeholder = \`Skriv et tal (1–\${maxVal})…\`;
+
+      input.disabled = false;
+      checkBtn.disabled = false;
+      resetBtn.hidden = true;
+
+      const hs = getSavedHighscore(maxVal);
+      highscoreEl.textContent = (hs ?? '—');
+
+      input.focus?.();
+    }
+
+    function endGame(win) {
+      gameOver = true;
+      input.disabled = true;
+      checkBtn.disabled = true;
+      resetBtn.hidden = false;
+
+      if (win) {
+        vibrate([60, 40, 160]);
+        beep(880, 140, 'triangle', 0.12);
+        const hs = getSavedHighscore(maxVal);
+        if (hs == null || attempts < hs) {
+          setSavedHighscore(maxVal, attempts);
+          highscoreEl.textContent = String(attempts);
+          feedback.textContent += ' — Ny highscore! 🏆';
+        }
+      } else {
+        vibrate([200, 100, 200]);
+        beep(220, 160, 'sawtooth', 0.08);
+      }
+    }
+
+    function onSubmit(e) {
+      e.preventDefault();
+      if (gameOver) return;
+
+      const raw = input.value.trim();
+      const val = parseInt(raw, 10);
+
+      if (!raw || Number.isNaN(val)) {
+        feedback.textContent = 'Skriv et tal først 😊';
+        return;
+      }
+      if (val < 1 || val > maxVal) {
+        feedback.textContent = \`Kun tal mellem 1 og \${maxVal}, tak.\`;
+        vibrate(80);
+        beep(320, 90, 'square', 0.06);
+        return;
+      }
+
+      attempts += 1;
+      attemptsEl.textContent = String(attempts);
+      history.push(val);
+      historyEl.textContent = history.join(', ');
+
+      if (val === secret) {
+        feedback.textContent = \`Rigtigt! \${val} var tallet 🎉\`;
+        endGame(true);
+        return;
+      }
+
+      const diff = Math.abs(val - secret);
+      const direction = val < secret ? 'For lavt' : 'For højt';
+      feedback.textContent = \`\${direction}. \${hotColdHint(diff, maxVal)}\`;
+      vibrate(60);
+      beep(360, 100, 'sine', 0.06);
+
+      if (Number.isFinite(remaining)) {
+        remaining -= 1;
+        leftEl.textContent = String(remaining);
+        if (remaining <= 0) {
+          feedback.textContent = \`Game over. Tallet var \${secret}.\`;
+          endGame(false);
+        }
+      } else {
+        leftEl.textContent = '∞';
+      }
+
+      input.select?.();
+    }
+
+    form.addEventListener('submit', onSubmit);
+    resetBtn.addEventListener('click', init);
+    newGameBtn.addEventListener('click', init);
+    rangeSel.addEventListener('change', init);
+    maxTriesSel.addEventListener('change', init);
+
+    init();
+  })();
+  </script>
+</body>
+</html>
